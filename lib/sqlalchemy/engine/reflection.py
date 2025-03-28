@@ -1715,6 +1715,8 @@ class Inspector(inspection.Inspectable["Inspector"]):
             # update pk constraint name and comment
             table.primary_key.name = pk_cons.get("name")
             table.primary_key.comment = pk_cons.get("comment", None)
+            if "dialect_options" in pk_cons:
+                table.primary_key.dialect_options = pk_cons["dialect_options"]
 
             # tell the PKConstraint to re-initialize
             # its column collection

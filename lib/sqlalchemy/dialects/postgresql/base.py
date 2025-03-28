@@ -2263,6 +2263,18 @@ class PGDDLCompiler(compiler.DDLCompiler):
         not_valid = constraint.dialect_options["postgresql"]["not_valid"]
         return " NOT VALID" if not_valid else ""
 
+    def _define_include(self, obj):
+        includeclause = obj.dialect_options["postgresql"]["include"]
+        if not includeclause:
+            return ""
+        inclusions = [
+            obj.table.c[col] if isinstance(col, str) else col
+            for col in includeclause
+        ]
+        return " INCLUDE (%s)" % ", ".join(
+            [self.preparer.quote(c.name) for c in inclusions]
+        )
+
     def visit_check_constraint(self, constraint, **kw):
         if constraint._type_bound:
             typ = list(constraint.columns)[0].type
@@ -2284,6 +2296,16 @@ class PGDDLCompiler(compiler.DDLCompiler):
     def visit_foreign_key_constraint(self, constraint, **kw):
         text = super().visit_foreign_key_constraint(constraint)
         text += self._define_constraint_validity(constraint)
+        return text
+
+    def visit_primary_key_constraint(self, constraint, **kw):
+        text = super().visit_primary_key_constraint(constraint)
+        text += self._define_include(constraint)
+        return text
+
+    def visit_unique_constraint(self, constraint, **kw):
+        text = super().visit_unique_constraint(constraint)
+        text += self._define_include(constraint)
         return text
 
     @util.memoized_property
@@ -2400,15 +2422,7 @@ class PGDDLCompiler(compiler.DDLCompiler):
             )
         )
 
-        includeclause = index.dialect_options["postgresql"]["include"]
-        if includeclause:
-            inclusions = [
-                index.table.c[col] if isinstance(col, str) else col
-                for col in includeclause
-            ]
-            text += " INCLUDE (%s)" % ", ".join(
-                [preparer.quote(c.name) for c in inclusions]
-            )
+        text += self._define_include(index)
 
         nulls_not_distinct = index.dialect_options["postgresql"][
             "nulls_not_distinct"
@@ -3157,8 +3171,15 @@ class PGDialect(default.DefaultDialect):
             },
         ),
         (
+            schema.PrimaryKeyConstraint,
+            {"include": None},
+        ),
+        (
             schema.UniqueConstraint,
-            {"nulls_not_distinct": None},
+            {
+                "include": None,
+                "nulls_not_distinct": None,
+            },
         ),
     ]
 
@@ -4054,6 +4075,9 @@ class PGDialect(default.DefaultDialect):
                     pg_catalog.pg_constraint.c.conkey, 1
                 ).label("ord"),
                 pg_catalog.pg_description.c.description,
+                pg_catalog.pg_get_constraintdef(
+                    pg_catalog.pg_constraint.c.oid, True
+                ).label("condef"),
             )
             .outerjoin(
                 pg_catalog.pg_description,
@@ -4074,6 +4098,7 @@ class PGDialect(default.DefaultDialect):
                 con_sq.c.conindid,
                 con_sq.c.description,
                 con_sq.c.ord,
+                con_sq.c.condef,
                 pg_catalog.pg_attribute.c.attname,
             )
             .select_from(pg_catalog.pg_attribute)
@@ -4108,8 +4133,9 @@ class PGDialect(default.DefaultDialect):
                 ).label("cols"),
                 attr_sq.c.conname,
                 sql.func.min(attr_sq.c.description).label("description"),
+                attr_sq.c.condef,
             )
-            .group_by(attr_sq.c.conrelid, attr_sq.c.conname)
+            .group_by(attr_sq.c.conrelid, attr_sq.c.conname, attr_sq.c.condef)
             .order_by(attr_sq.c.conrelid, attr_sq.c.conname)
         )
 
@@ -4133,6 +4159,10 @@ class PGDialect(default.DefaultDialect):
             )
         return constraint_query
 
+    @util.memoized_property
+    def _include_regex_pattern(self):
+        return re.compile(r" INCLUDE \((.+)\)")
+
     def _reflect_constraint(
         self, connection, contype, schema, filter_names, scope, kind, **kw
     ):
@@ -4142,6 +4172,8 @@ class PGDialect(default.DefaultDialect):
         )
         batches = list(table_oids)
         is_unique = contype == "u"
+
+        INCLUDE_REGEX = self._include_regex_pattern
 
         while batches:
             batch = batches[0:3000]
@@ -4153,21 +4185,28 @@ class PGDialect(default.DefaultDialect):
             )
 
             result_by_oid = defaultdict(list)
-            for oid, cols, constraint_name, comment, extra in result:
+            for oid, cols, constraint_name, comment, condef, extra in result:
                 result_by_oid[oid].append(
-                    (cols, constraint_name, comment, extra)
+                    (cols, constraint_name, comment, condef, extra)
                 )
 
             for oid, tablename in batch:
                 for_oid = result_by_oid.get(oid, ())
                 if for_oid:
-                    for cols, constraint, comment, extra in for_oid:
+                    for cols, constraint, comment, condef, extra in for_oid:
+                        opts = {}
                         if is_unique:
-                            yield tablename, cols, constraint, comment, {
-                                "nullsnotdistinct": extra
-                            }
-                        else:
-                            yield tablename, cols, constraint, comment, None
+                            opts["nullsnotdistinct"] = extra
+                        m = INCLUDE_REGEX.search(condef)
+                        if m:
+                            # TODO: improve the regex instead of
+                            # splitting/stripping below
+                            opts["include"] = [
+                                v.strip() for v in m.group(1).split(",")
+                            ]
+                        if not opts:
+                            opts = None
+                        yield tablename, cols, constraint, comment, opts
                 else:
                     yield tablename, None, None, None, None
 
@@ -4193,20 +4232,27 @@ class PGDialect(default.DefaultDialect):
         # only a single pk can be present for each table. Return an entry
         # even if a table has no primary key
         default = ReflectionDefaults.pk_constraint
+
+        def make(pk_name, cols, comment, opts):
+            if pk_name is None:
+                return default()
+            info = {
+                "constrained_columns": ([] if cols is None else cols),
+                "name": pk_name,
+                "comment": comment,
+            }
+            if opts and "include" in opts:
+                info["dialect_options"] = {
+                    "postgresql_include": opts["include"]
+                }
+            return info
+
         return (
             (
                 (schema, table_name),
-                (
-                    {
-                        "constrained_columns": [] if cols is None else cols,
-                        "name": pk_name,
-                        "comment": comment,
-                    }
-                    if pk_name is not None
-                    else default()
-                ),
+                make(pk_name, cols, comment, opts),
             )
-            for table_name, cols, pk_name, comment, _ in result
+            for table_name, cols, pk_name, comment, opts in result
         )
 
     @reflection.cache
@@ -4728,11 +4774,13 @@ class PGDialect(default.DefaultDialect):
             }
             if options:
                 if options["nullsnotdistinct"]:
-                    uc_dict["dialect_options"] = {
-                        "postgresql_nulls_not_distinct": options[
-                            "nullsnotdistinct"
-                        ]
-                    }
+                    uc_dict.setdefault("dialect_options", {})[
+                        "postgresql_nulls_not_distinct"
+                    ] = options["nullsnotdistinct"]
+                if "include" in options:
+                    uc_dict.setdefault("dialect_options", {})[
+                        "postgresql_include"
+                    ] = options["include"]
 
             uniques[(schema, table_name)].append(uc_dict)
         return uniques.items()
