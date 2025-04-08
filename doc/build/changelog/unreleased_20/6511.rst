@@ -1,0 +1,11 @@
+.. change::
+    :tags: usecase
+    :tickets: 6511
+
+    Added ``postgresql_collate`` keyword to :class:`_schema.Index` to control
+    the collation of columns in the index on PostgreSQL.
+    Pull request courtesy Denis Laxalde.
+
+    .. seealso::
+
+        :ref:`postgresql_indexes_collation`

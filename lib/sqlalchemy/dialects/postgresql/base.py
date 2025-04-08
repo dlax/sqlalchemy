@@ -1048,6 +1048,24 @@ Operator classes are also supported by the
 :paramref:`_postgresql.ExcludeConstraint.ops` parameter. See that parameter for
 details.
 
+.. _postgresql_indexes_collation:
+
+Collations
+^^^^^^^^^^
+PostgreSQL allows the specification of a collation for columns of
+an index (see https://www.postgresql.org/docs/current/indexes-collations.html).
+The :class:`.Index` construct allows these to be specified via the
+``postgresql_collate`` keyword argument::
+
+    Index(
+        "fr_idx",
+        my_table.c.content,
+        postgresql_collate={"content": "fr_FR.utf8"},
+    )
+
+The keys of ``postgresql_collate`` follow the same rules as those of
+``postgresql_ops``, see :ref:`postgresql_operator_classes`.
+
 Index Types
 ^^^^^^^^^^^
 
@@ -2441,6 +2459,7 @@ class PGDDLCompiler(compiler.DDLCompiler):
                 % self.preparer.validate_sql_phrase(using, IDX_USING).lower()
             )
 
+        collate = index.dialect_options["postgresql"]["collate"]
         ops = index.dialect_options["postgresql"]["ops"]
         text += "(%s)" % (
             ", ".join(
@@ -2453,6 +2472,11 @@ class PGDDLCompiler(compiler.DDLCompiler):
                         ),
                         include_table=False,
                         literal_binds=True,
+                    )
+                    + (
+                        (' COLLATE "%s"' % collate[expr.key])
+                        if hasattr(expr, "key") and expr.key in collate
+                        else ""
                     )
                     + (
                         (" " + ops[expr.key])
@@ -3186,6 +3210,7 @@ class PGDialect(default.DefaultDialect):
                 "with": {},
                 "tablespace": None,
                 "nulls_not_distinct": None,
+                "collate": {},
             },
         ),
         (
@@ -4520,6 +4545,9 @@ class PGDialect(default.DefaultDialect):
                 pg_catalog.pg_index.c.indexrelid,
                 pg_catalog.pg_index.c.indrelid,
                 sql.func.unnest(pg_catalog.pg_index.c.indkey).label("attnum"),
+                sql.func.unnest(pg_catalog.pg_index.c.indcollation).label(
+                    "att_collation"
+                ),
                 sql.func.generate_subscripts(
                     pg_catalog.pg_index.c.indkey, 1
                 ).label("ord"),
@@ -4551,6 +4579,7 @@ class PGDialect(default.DefaultDialect):
                     else_=pg_catalog.pg_attribute.c.attname.cast(TEXT),
                 ).label("element"),
                 (idx_sq.c.attnum == 0).label("is_expr"),
+                pg_catalog.pg_collation.c.collname,
             )
             .select_from(idx_sq)
             .outerjoin(
@@ -4560,6 +4589,10 @@ class PGDialect(default.DefaultDialect):
                     pg_catalog.pg_attribute.c.attnum == idx_sq.c.attnum,
                     pg_catalog.pg_attribute.c.attrelid == idx_sq.c.indrelid,
                 ),
+            )
+            .outerjoin(
+                pg_catalog.pg_collation,
+                pg_catalog.pg_collation.c.oid == idx_sq.c.att_collation,
             )
             .where(idx_sq.c.indrelid.in_(bindparam("oids")))
             .subquery("idx_attr")
@@ -4575,6 +4608,9 @@ class PGDialect(default.DefaultDialect):
                 sql.func.array_agg(
                     aggregate_order_by(attr_sq.c.is_expr, attr_sq.c.ord)
                 ).label("elements_is_expr"),
+                sql.func.array_agg(
+                    aggregate_order_by(attr_sq.c.collname, attr_sq.c.ord)
+                ).label("elements_collation"),
             )
             .group_by(attr_sq.c.indexrelid)
             .subquery("idx_cols")
@@ -4599,6 +4635,7 @@ class PGDialect(default.DefaultDialect):
                     "has_constraint"
                 ),
                 pg_catalog.pg_index.c.indoption,
+                pg_catalog.pg_index.c.indcollation,
                 pg_catalog.pg_class.c.reloptions,
                 pg_catalog.pg_am.c.amname,
                 # NOTE: pg_get_expr is very fast so this case has almost no
@@ -4617,6 +4654,7 @@ class PGDialect(default.DefaultDialect):
                 nulls_not_distinct,
                 cols_sq.c.elements,
                 cols_sq.c.elements_is_expr,
+                cols_sq.c.elements_collation,
             )
             .select_from(pg_catalog.pg_index)
             .where(
@@ -4689,6 +4727,7 @@ class PGDialect(default.DefaultDialect):
 
                     all_elements = row["elements"]
                     all_elements_is_expr = row["elements_is_expr"]
+                    all_elements_collation = row["elements_collation"]
                     indnkeyatts = row["indnkeyatts"]
                     # "The number of key columns in the index, not counting any
                     # included columns, which are merely stored and do not
@@ -4711,10 +4750,14 @@ class PGDialect(default.DefaultDialect):
                             not is_expr
                             for is_expr in all_elements_is_expr[indnkeyatts:]
                         )
+                        idx_elements_collation = all_elements_collation[
+                            :indnkeyatts
+                        ]
                     else:
                         idx_elements = all_elements
                         idx_elements_is_expr = all_elements_is_expr
                         inc_cols = []
+                        idx_elements_collation = all_elements_collation
 
                     index = {"name": index_name, "unique": row["indisunique"]}
                     if any(idx_elements_is_expr):
@@ -4727,6 +4770,18 @@ class PGDialect(default.DefaultDialect):
                         index["expressions"] = idx_elements
                     else:
                         index["column_names"] = idx_elements
+
+                    dialect_options = {}
+
+                    collate = {
+                        name: collation
+                        for name, collation in zip(
+                            idx_elements, idx_elements_collation
+                        )
+                        if collation not in (None, "default")
+                    }
+                    if collate:
+                        dialect_options["postgresql_collate"] = collate
 
                     sorting = {}
                     for col_index, col_flags in enumerate(row["indoption"]):
@@ -4747,7 +4802,6 @@ class PGDialect(default.DefaultDialect):
                     if row["has_constraint"]:
                         index["duplicates_constraint"] = index_name
 
-                    dialect_options = {}
                     if row["reloptions"]:
                         dialect_options["postgresql_with"] = dict(
                             [

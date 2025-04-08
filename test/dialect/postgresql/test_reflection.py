@@ -1721,6 +1721,44 @@ class ReflectionTest(
             "gin",
         )
 
+    def test_index_reflection_with_collate(self, metadata, connection):
+        """reflect indexes with COLLATE option"""
+
+        Table(
+            "t",
+            metadata,
+            Column("id", Integer, nullable=False),
+            Column("content", String),
+        )
+        metadata.create_all(connection)
+
+        connection.exec_driver_sql(
+            'CREATE INDEX ix_t ON t (content COLLATE "C")'
+        )
+
+        ind = inspect(connection).get_indexes("t", None)
+        expected = [
+            {
+                "unique": False,
+                "column_names": ["content"],
+                "name": "ix_t",
+                "dialect_options": {
+                    "postgresql_include": [],
+                    "postgresql_collate": {"content": "C"},
+                },
+                "include_columns": [],
+            }
+        ]
+        eq_(ind, expected)
+
+        m = MetaData()
+        t1 = Table("t", m, autoload_with=connection)
+        r_ind = list(t1.indexes)[0]
+        eq_(
+            r_ind.dialect_options["postgresql"]["collate"],
+            {"content": "C"},
+        )
+
     @testing.skip_if("postgresql < 15.0", "nullsnotdistinct not supported")
     def test_nullsnotdistinct(self, metadata, connection):
         Table(

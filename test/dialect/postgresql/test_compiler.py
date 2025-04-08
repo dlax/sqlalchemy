@@ -701,6 +701,22 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=postgresql.dialect(),
         )
 
+    def test_create_index_with_collate(self):
+        m = MetaData()
+        tbl = Table("t", m, Column("s", String))
+
+        idx = Index(
+            "ix",
+            tbl.c.s,
+            postgresql_collate={"s": "C"},
+            postgresql_ops={"s": "text_pattern_ops"},
+        )
+
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            'CREATE INDEX ix ON t (s COLLATE "C" text_pattern_ops)',
+        )
+
     @testing.combinations(
         (
             lambda tbl: schema.CreateIndex(
