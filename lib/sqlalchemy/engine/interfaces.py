@@ -1799,7 +1799,7 @@ class Dialect(EventTarget):
 
         raise NotImplementedError()
 
-    def normalize_name(self, name: str) -> str:
+    def normalize_name(self, name: Optional[str]) -> Optional[str]:
         """convert the given name to lowercase if it is detected as
         case insensitive.
 
@@ -1809,7 +1809,7 @@ class Dialect(EventTarget):
         """
         raise NotImplementedError()
 
-    def denormalize_name(self, name: str) -> str:
+    def denormalize_name(self, name: Optional[str]) -> Optional[str]:
         """convert the given name to a case insensitive identifier
         for the backend if it is an all-lowercase name.
 

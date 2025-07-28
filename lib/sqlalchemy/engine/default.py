@@ -4,7 +4,7 @@
 #
 # This module is part of SQLAlchemy and is released under
 # the MIT License: https://www.opensource.org/licenses/mit-license.php
-# mypy: allow-untyped-defs, allow-untyped-calls
+# mypy: allow-untyped-calls
 
 """Default implementations of per-dialect sqlalchemy.engine classes.
 
@@ -27,16 +27,20 @@ from typing import Callable
 from typing import cast
 from typing import Dict
 from typing import Final
+from typing import Iterable
 from typing import List
 from typing import Mapping
 from typing import MutableMapping
 from typing import MutableSequence
+from typing import NoReturn
 from typing import Optional
+from typing import Self
 from typing import Sequence
 from typing import Set
 from typing import Tuple
 from typing import Type
 from typing import TYPE_CHECKING
+from typing import TypeVar
 from typing import Union
 import weakref
 
@@ -82,27 +86,41 @@ if typing.TYPE_CHECKING:
     from .interfaces import _DBAPIMultiExecuteParams
     from .interfaces import _DBAPISingleExecuteParams
     from .interfaces import _ExecuteOptions
+    from .interfaces import _GenericSetInputSizesType
     from .interfaces import _MutableCoreSingleExecuteParams
     from .interfaces import _ParamStyle
     from .interfaces import ConnectArgsType
     from .interfaces import DBAPIConnection
     from .interfaces import DBAPIModule
+    from .interfaces import DBAPIType
     from .interfaces import IsolationLevel
+    from .interfaces import ReflectedCheckConstraint
+    from .interfaces import ReflectedColumn
+    from .interfaces import ReflectedForeignKeyConstraint
+    from .interfaces import ReflectedIndex
+    from .interfaces import ReflectedPrimaryKeyConstraint
+    from .interfaces import ReflectedTableComment
+    from .interfaces import ReflectedUniqueConstraint
+    from .interfaces import TableKey
     from .row import Row
     from .url import URL
     from ..event import _ListenerFnType
     from ..pool import Pool
     from ..pool import PoolProxiedConnection
     from ..sql import Executable
+    from ..sql._typing import _TypeEngineArgument
     from ..sql.compiler import Compiled
     from ..sql.compiler import Linting
     from ..sql.compiler import ResultColumnsEntry
     from ..sql.dml import DMLState
     from ..sql.dml import UpdateBase
     from ..sql.elements import BindParameter
+    from ..sql.schema import _T
     from ..sql.schema import Column
+    from ..sql.schema import DefaultGenerator
     from ..sql.type_api import _BindProcessorType
     from ..sql.type_api import _ResultProcessorType
+    from ..sql.type_api import _TypeMemoDict
     from ..sql.type_api import TypeEngine
 
 
@@ -383,7 +401,7 @@ class DefaultDialect(Dialect):
         "full_returning is deprecated, please use insert_returning, "
         "update_returning, delete_returning",
     )
-    def full_returning(self):
+    def full_returning(self) -> bool:
         return (
             self.insert_returning
             and self.update_returning
@@ -391,7 +409,7 @@ class DefaultDialect(Dialect):
         )
 
     @util.memoized_property
-    def insert_executemany_returning(self):
+    def insert_executemany_returning(self) -> bool:
         """Default implementation for insert_executemany_returning, if not
         otherwise overridden by the specific dialect.
 
@@ -406,7 +424,7 @@ class DefaultDialect(Dialect):
         return self.insert_returning and self.use_insertmanyvalues
 
     @util.memoized_property
-    def insert_executemany_returning_sort_by_parameter_order(self):
+    def insert_executemany_returning_sort_by_parameter_order(self) -> bool:
         """Default implementation for
         insert_executemany_returning_deterministic_order, if not otherwise
         overridden by the specific dialect.
@@ -441,7 +459,7 @@ class DefaultDialect(Dialect):
         return self.dbapi
 
     @util.memoized_property
-    def _bind_typing_render_casts(self):
+    def _bind_typing_render_casts(self) -> bool:
         return self.bind_typing is interfaces.BindTyping.RENDER_CASTS
 
     def _ensure_has_table_connection(self, arg: Connection) -> None:
@@ -457,7 +475,7 @@ class DefaultDialect(Dialect):
             )
 
     @util.memoized_property
-    def _supports_statement_cache(self):
+    def _supports_statement_cache(self) -> bool:
         ssc = self.__class__.__dict__.get("supports_statement_cache", None)
         if ssc is None:
             util.warn(
@@ -477,15 +495,17 @@ class DefaultDialect(Dialect):
         return bool(ssc)
 
     @util.memoized_property
-    def _type_memos(self):
+    def _type_memos(
+        self,
+    ) -> MutableMapping[TypeEngine[Any], _TypeMemoDict]:
         return weakref.WeakKeyDictionary()
 
     @property
-    def dialect_description(self):  # type: ignore[override]
+    def dialect_description(self) -> str:  # type: ignore[override]
         return self.name + "+" + self.driver
 
     @property
-    def supports_sane_rowcount_returning(self):
+    def supports_sane_rowcount_returning(self) -> bool:
         """True if this dialect supports sane rowcount even if RETURNING is
         in use.
 
@@ -509,7 +529,7 @@ class DefaultDialect(Dialect):
         return self.get_pool_class(url)
 
     @classmethod
-    def load_provisioning(cls):
+    def load_provisioning(cls) -> None:
         package = ".".join(cls.__module__.split(".")[0:-1])
         try:
             __import__(package + ".provision")
@@ -519,9 +539,12 @@ class DefaultDialect(Dialect):
     def _builtin_onconnect(self) -> Optional[_ListenerFnType]:
         if self._on_connect_isolation_level is not None:
 
-            def builtin_connect(dbapi_conn, conn_rec):
+            def builtin_connect(
+                dbapi_conn: DBAPIConnection, conn_rec: Any
+            ) -> None:
                 self._assert_and_set_isolation_level(
-                    dbapi_conn, self._on_connect_isolation_level
+                    dbapi_conn,
+                    self._on_connect_isolation_level,  # type: ignore[arg-type]
                 )
 
             return builtin_connect
@@ -544,7 +567,7 @@ class DefaultDialect(Dialect):
 
         try:
             self.default_isolation_level = self.get_default_isolation_level(
-                connection.connection.dbapi_connection
+                connection.connection.dbapi_connection  # type: ignore[arg-type]  # noqa: E501
             )
         except NotImplementedError:
             self.default_isolation_level = None
@@ -568,7 +591,9 @@ class DefaultDialect(Dialect):
         # inherits the docstring from interfaces.Dialect.on_connect
         return None
 
-    def _check_max_identifier_length(self, connection):
+    def _check_max_identifier_length(
+        self, connection: Connection
+    ) -> Optional[int]:
         """Perform a connection / server version specific check to determine
         the max_identifier_length.
 
@@ -578,7 +603,9 @@ class DefaultDialect(Dialect):
         """
         return None
 
-    def get_default_isolation_level(self, dbapi_conn):
+    def get_default_isolation_level(
+        self, dbapi_conn: DBAPIConnection
+    ) -> IsolationLevel:
         """Given a DBAPI connection, return its isolation level, or
         a default isolation level if one cannot be retrieved.
 
@@ -592,7 +619,9 @@ class DefaultDialect(Dialect):
         """
         return self.get_isolation_level(dbapi_conn)
 
-    def type_descriptor(self, typeobj):
+    def type_descriptor(
+        self, typeobj: _TypeEngineArgument[Any]
+    ) -> TypeEngine[Any]:
         """Provide a database-specific :class:`.TypeEngine` object, given
         the generic object which comes from the types module.
 
@@ -603,7 +632,14 @@ class DefaultDialect(Dialect):
         """
         return type_api.adapt_type(typeobj, self.colspecs)
 
-    def has_index(self, connection, table_name, index_name, schema=None, **kw):
+    def has_index(
+        self,
+        connection: Connection,
+        table_name: str,
+        index_name: str,
+        schema: Optional[str] = None,
+        **kw: Any,
+    ) -> bool:
         if not self.has_table(connection, table_name, schema=schema, **kw):
             return False
         for idx in self.get_indexes(
@@ -648,7 +684,7 @@ class DefaultDialect(Dialect):
             )
 
             @event.listens_for(engine, "engine_connect")
-            def set_connection_characteristics(connection):
+            def set_connection_characteristics(connection: Connection) -> None:
                 self._set_connection_characteristics(
                     connection, characteristics
                 )
@@ -665,7 +701,9 @@ class DefaultDialect(Dialect):
             )
             self._set_connection_characteristics(connection, characteristics)
 
-    def _set_connection_characteristics(self, connection, characteristics):
+    def _set_connection_characteristics(
+        self, connection: Connection, characteristics: Mapping[str, Any]
+    ) -> None:
         characteristic_values = [
             (name, self.connection_characteristics[name], value)
             for name, value in characteristics.items()
@@ -687,6 +725,8 @@ class DefaultDialect(Dialect):
                 )
 
         dbapi_connection = connection.connection.dbapi_connection
+        if TYPE_CHECKING:
+            assert dbapi_connection is not None
         for _, characteristic, value in characteristic_values:
             characteristic.set_connection_characteristic(
                 self, connection, dbapi_connection, value
@@ -695,30 +735,34 @@ class DefaultDialect(Dialect):
             functools.partial(self._reset_characteristics, characteristics)
         )
 
-    def _reset_characteristics(self, characteristics, dbapi_connection):
+    def _reset_characteristics(
+        self,
+        characteristics: Mapping[str, Any],
+        dbapi_connection: DBAPIConnection,
+    ) -> None:
         for characteristic_name in characteristics:
             characteristic = self.connection_characteristics[
                 characteristic_name
             ]
             characteristic.reset_characteristic(self, dbapi_connection)
 
-    def do_begin(self, dbapi_connection):
+    def do_begin(self, dbapi_connection: DBAPIConnection) -> None:
         pass
 
-    def do_rollback(self, dbapi_connection):
+    def do_rollback(self, dbapi_connection: DBAPIConnection) -> None:
         dbapi_connection.rollback()
 
-    def do_commit(self, dbapi_connection):
+    def do_commit(self, dbapi_connection: DBAPIConnection) -> None:
         dbapi_connection.commit()
 
-    def do_terminate(self, dbapi_connection):
+    def do_terminate(self, dbapi_connection: DBAPIConnection) -> None:
         self.do_close(dbapi_connection)
 
-    def do_close(self, dbapi_connection):
+    def do_close(self, dbapi_connection: DBAPIConnection) -> None:
         dbapi_connection.close()
 
     @util.memoized_property
-    def _dialect_specific_select_one(self):
+    def _dialect_specific_select_one(self) -> str:
         return str(expression.select(1).compile(dialect=self))
 
     def _do_ping_w_event(self, dbapi_connection: DBAPIConnection) -> bool:
@@ -752,7 +796,7 @@ class DefaultDialect(Dialect):
             cursor.close()
         return True
 
-    def create_xid(self):
+    def create_xid(self) -> str:
         """Create a random two-phase transaction ID.
 
         This id will be passed to do_begin_twophase(), do_rollback_twophase(),
@@ -761,25 +805,26 @@ class DefaultDialect(Dialect):
 
         return "_sa_%032x" % random.randint(0, 2**128)
 
-    def do_savepoint(self, connection, name):
+    def do_savepoint(self, connection: Connection, name: str) -> None:
         connection.execute(expression.SavepointClause(name))
 
-    def do_rollback_to_savepoint(self, connection, name):
+    def do_rollback_to_savepoint(
+        self, connection: Connection, name: str
+    ) -> None:
         connection.execute(expression.RollbackToSavepointClause(name))
 
-    def do_release_savepoint(self, connection, name):
+    def do_release_savepoint(self, connection: Connection, name: str) -> None:
         connection.execute(expression.ReleaseSavepointClause(name))
 
     def _deliver_insertmanyvalues_batches(
         self,
-        connection,
-        cursor,
-        statement,
-        parameters,
-        generic_setinputsizes,
-        context,
+        connection: Connection,
+        cursor: DBAPICursor,
+        statement: str,
+        parameters: _DBAPIMultiExecuteParams,
+        generic_setinputsizes: Optional[_GenericSetInputSizesType],
+        context: DefaultExecutionContext,
     ):
-        context = cast(DefaultExecutionContext, context)
         compiled = cast(SQLCompiler, context.compiled)
 
         _composite_sentinel_proc: Sequence[
@@ -942,7 +987,9 @@ class DefaultDialect(Dialect):
                 else:
                     result.extend(rows)
 
-    def do_executemany(self, cursor, statement, parameters, context=None):
+    def do_executemany(
+        self, cursor, statement, parameters, context: Optional[Any] = None
+    ) -> None:
         cursor.executemany(statement, parameters)
 
     def do_execute(self, cursor, statement, parameters, context=None):
@@ -962,7 +1009,9 @@ class DefaultDialect(Dialect):
         return False
 
     @util.memoized_instancemethod
-    def _gen_allowed_isolation_levels(self, dbapi_conn):
+    def _gen_allowed_isolation_levels(
+        self, dbapi_conn: DBAPIConnection
+    ) -> Optional[Tuple[str, ...]]:
         try:
             raw_levels = list(self.get_isolation_level_values(dbapi_conn))
         except NotImplementedError:
@@ -980,8 +1029,10 @@ class DefaultDialect(Dialect):
                 )
             return tuple(normalized_levels)
 
-    def _assert_and_set_isolation_level(self, dbapi_conn, level):
-        level = level.replace("_", " ").upper()
+    def _assert_and_set_isolation_level(
+        self, dbapi_conn: DBAPIConnection, level: IsolationLevel
+    ) -> None:
+        level = level.replace("_", " ").upper()  # type: ignore[assignment]
 
         _allowed_isolation_levels = self._gen_allowed_isolation_levels(
             dbapi_conn
@@ -998,7 +1049,7 @@ class DefaultDialect(Dialect):
 
         self.set_isolation_level(dbapi_conn, level)
 
-    def reset_isolation_level(self, dbapi_conn):
+    def reset_isolation_level(self, dbapi_conn: DBAPIConnection) -> None:
         if self._on_connect_isolation_level is not None:
             assert (
                 self._on_connect_isolation_level == "AUTOCOMMIT"
@@ -1015,7 +1066,7 @@ class DefaultDialect(Dialect):
                 self.default_isolation_level,
             )
 
-    def normalize_name(self, name):
+    def normalize_name(self, name: Optional[str]) -> Optional[str]:
         if name is None:
             return None
 
@@ -1041,7 +1092,7 @@ class DefaultDialect(Dialect):
             # later, no normalizes
             return name
 
-    def denormalize_name(self, name):
+    def denormalize_name(self, name: Optional[str]) -> Optional[str]:
         if name is None:
             return None
 
@@ -1061,22 +1112,24 @@ class DefaultDialect(Dialect):
     def get_driver_connection(self, connection: DBAPIConnection) -> Any:
         return connection
 
-    def _overrides_default(self, method):
+    def _overrides_default(self, method: str) -> bool:
         return (
             getattr(type(self), method).__code__
             is not getattr(DefaultDialect, method).__code__
         )
 
+    _R = TypeVar("_R")
+
     def _default_multi_reflect(
         self,
-        single_tbl_method,
-        connection,
-        kind,
-        schema,
-        filter_names,
-        scope,
-        **kw,
-    ):
+        single_tbl_method: Callable[..., _R],
+        connection: Connection,
+        kind: ObjectKind,
+        schema: str,
+        filter_names: Sequence[str],
+        scope: ObjectScope,
+        **kw: Any,
+    ) -> Iterable[Tuple[TableKey, _R]]:
         names_fns = []
         temp_names_fns = []
         if ObjectKind.TABLE in kind:
@@ -1121,7 +1174,7 @@ class DefaultDialect(Dialect):
                     pass
 
         if filter_names:
-            filter_names = set(filter_names)
+            filter_names = set(filter_names)  # type: ignore[assignment]
 
         # iterate over all the tables/views and call the single table method
         for table in names:
@@ -1140,38 +1193,54 @@ class DefaultDialect(Dialect):
                 except exc.NoSuchTableError:
                     pass
 
-    def get_multi_table_options(self, connection, **kw):
+    def get_multi_table_options(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, Dict[str, Any]]]:
         return self._default_multi_reflect(
             self.get_table_options, connection, **kw
         )
 
-    def get_multi_columns(self, connection, **kw):
+    def get_multi_columns(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, List[ReflectedColumn]]]:
         return self._default_multi_reflect(self.get_columns, connection, **kw)
 
-    def get_multi_pk_constraint(self, connection, **kw):
+    def get_multi_pk_constraint(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, ReflectedPrimaryKeyConstraint]]:
         return self._default_multi_reflect(
             self.get_pk_constraint, connection, **kw
         )
 
-    def get_multi_foreign_keys(self, connection, **kw):
+    def get_multi_foreign_keys(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, List[ReflectedForeignKeyConstraint]]]:
         return self._default_multi_reflect(
             self.get_foreign_keys, connection, **kw
         )
 
-    def get_multi_indexes(self, connection, **kw):
+    def get_multi_indexes(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, List[ReflectedIndex]]]:
         return self._default_multi_reflect(self.get_indexes, connection, **kw)
 
-    def get_multi_unique_constraints(self, connection, **kw):
+    def get_multi_unique_constraints(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, List[ReflectedUniqueConstraint]]]:
         return self._default_multi_reflect(
             self.get_unique_constraints, connection, **kw
         )
 
-    def get_multi_check_constraints(self, connection, **kw):
+    def get_multi_check_constraints(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, List[ReflectedCheckConstraint]]]:
         return self._default_multi_reflect(
             self.get_check_constraints, connection, **kw
         )
 
-    def get_multi_table_comment(self, connection, **kw):
+    def get_multi_table_comment(
+        self, connection: Connection, **kw: Any
+    ) -> Iterable[Tuple[TableKey, ReflectedTableComment]]:
         return self._default_multi_reflect(
             self.get_table_comment, connection, **kw
         )
@@ -1235,7 +1304,9 @@ class DefaultExecutionContext(ExecutionContext):
     # a hook for SQLite's translation of
     # result column names
     # NOTE: pyhive is using this hook, can't remove it :(
-    _translate_colname: Optional[Callable[[str], str]] = None
+    _translate_colname: Optional[
+        Callable[[str], Tuple[str, Optional[str]]]
+    ] = None
 
     _expanded_parameters: Mapping[str, List[str]] = util.immutabledict()
     """used by set_input_sizes().
@@ -1584,7 +1655,7 @@ class DefaultExecutionContext(ExecutionContext):
         connection: Connection,
         dbapi_connection: PoolProxiedConnection,
         execution_options: _ExecuteOptions,
-    ) -> ExecutionContext:
+    ) -> Self:
         """Initialize execution context for a ColumnDefault construct."""
 
         self = cls.__new__(cls)
@@ -1632,7 +1703,7 @@ class DefaultExecutionContext(ExecutionContext):
             return "unknown"
 
     @property
-    def executemany(self):  # type: ignore[override]
+    def executemany(self) -> bool:  # type: ignore[override]
         return self.execute_style in (
             ExecuteStyle.EXECUTEMANY,
             ExecuteStyle.INSERTMANYVALUES,
@@ -1780,18 +1851,20 @@ class DefaultExecutionContext(ExecutionContext):
     def create_server_side_cursor(self) -> DBAPICursor:
         raise NotImplementedError()
 
-    def pre_exec(self):
+    def pre_exec(self) -> None:
         pass
 
-    def get_out_parameter_values(self, names):
+    def get_out_parameter_values(self, names) -> NoReturn:
         raise NotImplementedError(
             "This dialect does not support OUT parameters"
         )
 
-    def post_exec(self):
+    def post_exec(self) -> None:
         pass
 
-    def get_result_processor(self, type_, colname, coltype):
+    def get_result_processor(
+        self, type_: TypeEngine[Any], colname: str, coltype: DBAPIType
+    ) -> Optional[_ResultProcessorType[Any]]:
         """Return a 'result processor' for a given type as present in
         cursor.description.
 
@@ -1801,7 +1874,7 @@ class DefaultExecutionContext(ExecutionContext):
         """
         return type_._cached_result_processor(self.dialect, coltype)
 
-    def get_lastrowid(self):
+    def get_lastrowid(self) -> int:
         """return self.cursor.lastrowid, or equivalent, after an INSERT.
 
         This may involve calling special cursor functions, issuing a new SELECT
@@ -2055,7 +2128,7 @@ class DefaultExecutionContext(ExecutionContext):
             getter(row, param) for row, param in zip(rows, compiled_params)
         ]
 
-    def lastrow_has_defaults(self):
+    def lastrow_has_defaults(self) -> bool:
         return (self.isinsert or self.isupdate) and bool(
             cast(SQLCompiler, self.compiled).postfetch
         )
@@ -2167,7 +2240,12 @@ class DefaultExecutionContext(ExecutionContext):
 
         return generic_inputsizes
 
-    def _exec_default(self, column, default, type_):
+    def _exec_default(
+        self,
+        column: Optional[Column[Any]],
+        default: DefaultGenerator,
+        type_: Optional[TypeEngine[Any]],
+    ) -> Any:
         if default.is_sequence:
             return self.fire_sequence(default, type_)
         elif default.is_callable:
@@ -2308,19 +2386,19 @@ class DefaultExecutionContext(ExecutionContext):
         else:
             return parameters
 
-    def get_insert_default(self, column):
+    def get_insert_default(self, column: Column[_T]) -> Optional[_T]:
         if column.default is None:
             return None
         else:
             return self._exec_default(column, column.default, column.type)
 
-    def get_update_default(self, column):
+    def get_update_default(self, column: Column) -> Optional[_T]:
         if column.onupdate is None:
             return None
         else:
             return self._exec_default(column, column.onupdate, column.type)
 
-    def _process_execute_defaults(self):
+    def _process_execute_defaults(self) -> None:
         compiled = cast(SQLCompiler, self.compiled)
 
         key_getter = compiled._within_exec_param_key_getter
